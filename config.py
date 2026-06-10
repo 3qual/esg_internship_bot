@@ -1,12 +1,25 @@
 # config.py
-# !! Вставь свой токен от @BotFather сюда !!
-BOT_TOKEN = "8632278167:AAG9an_XZcgVC4uTSNN482p7L70ZhvbOwtc"
+from pathlib import Path
 
-# Длительность рейтинговой сессии в днях
-RATING_SESSION_DAYS = 45
+BASE_DIR = Path(__file__).resolve().parent
+TOKEN_FILE = BASE_DIR / "token.txt"
 
-# Баллы за правильный ответ в финальном тесте
-# 27 вопросов, максимум 100 очков → каждый вопрос ~3.7 балла
-# Первые 27 вопросов × 3 = 81, плюс 1 вопрос = 4 → итого сделано равномерно через round
-QUIZ_MAX_SCORE = 100
-QUIZ_QUESTIONS_COUNT = 27
+
+def load_token() -> str:
+    if not TOKEN_FILE.exists():
+        raise FileNotFoundError(
+            "Файл token.txt не найден в корне проекта. "
+            "Создай token.txt и помести туда Telegram Bot Token."
+        )
+
+    token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+
+    if not token:
+        raise ValueError("Файл token.txt пустой. Укажи в нём Telegram Bot Token.")
+
+    return token
+
+
+BOT_TOKEN = load_token()
+
+RATING_SESSION_DAYS = 30

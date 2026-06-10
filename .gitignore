@@ -1,0 +1,15 @@
+# sensitive
+token.txt
+
+# local database and backups
+esg_bot.db
+backups/
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# logs
+*.log
+logs/
