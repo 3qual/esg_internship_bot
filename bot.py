@@ -31,10 +31,10 @@ async def main():
     )
     dp = Dispatcher()
 
-    # Порядок важен: start → days → quiz
-    dp.include_router(start_router)
-    dp.include_router(days_router)
-    dp.include_router(quiz_router)
+    # порядок подключения роутеров
+    dp.include_router(start.router)
+    dp.include_router(quiz.router)   # ← quiz ПЕРЕД days (для "continue" при day=6)
+    dp.include_router(days.router)
 
     logger.info("Бот запущен. Polling...")
     await dp.start_polling(bot, skip_updates=True)

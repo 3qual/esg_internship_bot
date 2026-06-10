@@ -3,7 +3,9 @@
 Финальный тест — 27 вопросов, таймер, рейтинг.
 """
 import asyncio
+import random
 import time
+
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from aiogram import Bot
@@ -15,11 +17,12 @@ from content.final_quiz import QUESTIONS
 
 router = Router()
 
+
 async def start_quiz(user_id: int, bot: Bot, chat_id: int):
     """Запускает финальный тест."""
     await update_user(
         user_id,
-        current_day=6,      # 6 = тест начат
+        current_day=6,
         current_step=0,
         quiz_score=0,
         quiz_start_ts=time.time(),
@@ -35,6 +38,7 @@ async def start_quiz(user_id: int, bot: Bot, chat_id: int):
         reply_markup=make_continue_keyboard("Начать тест ▶️")
     )
 
+
 async def send_quiz_question(user_id: int, bot: Bot, chat_id: int):
     """Отправляет текущий вопрос теста."""
     user = await get_user(user_id)
@@ -48,17 +52,26 @@ async def send_quiz_question(user_id: int, bot: Bot, chat_id: int):
     num = step + 1
     total = len(QUESTIONS)
 
-    options = [
-        {"text": opt["text"], "callback_data": f"quiz_{step}_{i}"}
-        for i, opt in enumerate(q["options"])
+    # Перемешиваем варианты ответов, сохраняя правильный
+    options_with_idx = list(enumerate(q["options"]))
+    random.shuffle(options_with_idx)
+
+    keyboard_options = [
+        {
+            "text": opt["text"],
+            # кодируем оригинальный индекс варианта
+            "callback_data": f"quiz_{step}_{orig_idx}"
+        }
+        for orig_idx, opt in options_with_idx
     ]
 
     await bot.send_message(
         chat_id,
         f"❓ <b>Вопрос {num}/{total}</b>\n\n{q['text']}",
         parse_mode="HTML",
-        reply_markup=make_choice_keyboard(options)
+        reply_markup=make_choice_keyboard(keyboard_options)
     )
+
 
 async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
     """Завершает тест, считает результат, сохраняет в рейтинг."""
@@ -68,16 +81,13 @@ async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
     start_ts = user["quiz_start_ts"] or end_ts
     elapsed = end_ts - start_ts
 
-    await update_user(user_id, quiz_end_ts=end_ts, current_day=7)  # 7 = всё пройдено
+    await update_user(user_id, quiz_end_ts=end_ts, current_day=7)
 
-    # Максимум 100 баллов (27 вопросов × ~3.7 балла каждый)
     max_raw = len(QUESTIONS)
     score_100 = round((score / max_raw) * 100)
 
-    # Сохраняем в рейтинг
     place = await save_result(user_id, user["name"], score_100, elapsed)
 
-    # Финальное сообщение
     emoji = place_emoji(place)
     label = place_label(place)
     time_str = format_time(elapsed)
@@ -114,9 +124,32 @@ async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
         reply_markup=make_rating_keyboard()
     )
 
+
+# ── Callback: кнопка «🏆 Пройти финальный тест» ───────────────────────────────
+@router.callback_query(F.data == "start_quiz")
+async def on_start_quiz(callback: CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await start_quiz(callback.from_user.id, callback.bot, callback.message.chat.id)
+    await callback.answer()
+
+
+# ── Callback: кнопка «Начать тест ▶️» (continue) уже обрабатывается в days.py,
+#    но нам нужна своя логика когда user в состоянии day=6 ─────────────────────
+@router.callback_query(F.data == "continue")
+async def on_quiz_continue(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if user and user.get("current_day") == 6:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await send_quiz_question(callback.from_user.id, callback.bot, callback.message.chat.id)
+        await callback.answer()
+    # Если это не quiz-контекст — пропускаем, days.py обработает
+    # (aiogram отдаёт первому подходящему router, порядок важен в bot.py)
+
+
+# ── Callback: ответ на вопрос теста ──────────────────────────────────────────
 @router.callback_query(F.data.startswith("quiz_"))
 async def on_quiz_answer(callback: CallbackQuery):
-    await callback.message.edit_reply_markup()
+    await callback.message.edit_reply_markup(reply_markup=None)
 
     parts = callback.data.split("_")
     step_idx = int(parts[1])
@@ -126,7 +159,6 @@ async def on_quiz_answer(callback: CallbackQuery):
     q = QUESTIONS[step_idx]
     option = q["options"][option_idx]
 
-    # Начисляем балл
     if option["is_correct"]:
         new_score = (user["quiz_score"] or 0) + 1
         await update_user(callback.from_user.id, quiz_score=new_score)
@@ -143,6 +175,8 @@ async def on_quiz_answer(callback: CallbackQuery):
     await send_quiz_question(callback.from_user.id, callback.bot, callback.message.chat.id)
     await callback.answer()
 
+
+# ── Callback: показать рейтинг ────────────────────────────────────────────────
 @router.callback_query(F.data == "show_rating")
 async def on_show_rating(callback: CallbackQuery):
     from database import get_top_rating
@@ -165,3 +199,4 @@ async def on_show_rating(callback: CallbackQuery):
 
     await callback.message.answer("\n".join(lines), parse_mode="HTML")
     await callback.answer()
+    
