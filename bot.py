@@ -12,8 +12,8 @@ from config import BOT_TOKEN
 from database import init_db
 
 from handlers.start import router as start_router
-from handlers.days import router as days_router
 from handlers.quiz import router as quiz_router
+from handlers.days import router as days_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,10 +31,10 @@ async def main():
     )
     dp = Dispatcher()
 
-    # порядок подключения роутеров
-    dp.include_router(start.router)
-    dp.include_router(quiz.router)   # ← quiz ПЕРЕД days (для "continue" при day=6)
-    dp.include_router(days.router)
+    # quiz ПЕРЕД days — чтобы callback "continue" при day=6 перехватывал quiz, а не days
+    dp.include_router(start_router)
+    dp.include_router(quiz_router)
+    dp.include_router(days_router)
 
     logger.info("Бот запущен. Polling...")
     await dp.start_polling(bot, skip_updates=True)
