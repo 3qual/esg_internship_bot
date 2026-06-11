@@ -7,10 +7,13 @@ import random
 import time
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 from aiogram import Bot
 
-from database import get_user, update_user, save_result
+from database import (
+    get_user, update_user, save_result,
+    ensure_user_certificate, get_top_rating, get_full_rating, get_certificate_info
+)
 from utils.keyboards import make_choice_keyboard, make_continue_keyboard, make_rating_keyboard
 from utils.rating_calc import format_time, place_emoji, place_label
 from content.final_quiz import QUESTIONS
@@ -19,7 +22,6 @@ router = Router()
 
 
 async def start_quiz(user_id: int, bot: Bot, chat_id: int):
-    """Запускает финальный тест."""
     await update_user(
         user_id,
         current_day=6,
@@ -40,7 +42,6 @@ async def start_quiz(user_id: int, bot: Bot, chat_id: int):
 
 
 async def send_quiz_question(user_id: int, bot: Bot, chat_id: int):
-    """Отправляет текущий вопрос теста."""
     user = await get_user(user_id)
     step = user["current_step"]
 
@@ -52,14 +53,12 @@ async def send_quiz_question(user_id: int, bot: Bot, chat_id: int):
     num = step + 1
     total = len(QUESTIONS)
 
-    # Перемешиваем варианты ответов, сохраняя правильный
     options_with_idx = list(enumerate(q["options"]))
     random.shuffle(options_with_idx)
 
     keyboard_options = [
         {
             "text": opt["text"],
-            # кодируем оригинальный индекс варианта
             "callback_data": f"quiz_{step}_{orig_idx}"
         }
         for orig_idx, opt in options_with_idx
@@ -74,7 +73,6 @@ async def send_quiz_question(user_id: int, bot: Bot, chat_id: int):
 
 
 async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
-    """Завершает тест, считает результат, сохраняет в рейтинг."""
     user = await get_user(user_id)
     score = user["quiz_score"]
     end_ts = time.time()
@@ -86,7 +84,10 @@ async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
     max_raw = len(QUESTIONS)
     score_100 = round((score / max_raw) * 100)
 
+    await update_user(user_id, quiz_score=score_100)
+
     place = await save_result(user_id, user["name"], score_100, elapsed)
+    cert_number, cert_issued_at = await ensure_user_certificate(user_id)
 
     emoji = place_emoji(place)
     label = place_label(place)
@@ -95,7 +96,9 @@ async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
     msg = (
         f"🏁 <b>Стажировка завершена!</b>\n\n"
         f"📊 Результат: <b>{score_100}/100</b>\n"
-        f"⏱ Время: <b>{time_str}</b>\n\n"
+        f"⏱ Время: <b>{time_str}</b>\n"
+        f"🎓 Номер сертификата: <b>{cert_number}</b>\n"
+        f"📅 Дата выдачи: <b>{cert_issued_at}</b>\n\n"
         f"{emoji} <b>{label}</b>\n\n"
     )
 
@@ -113,8 +116,9 @@ async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
     else:
         msg += (
             "📜 Ты прошёл стажировку и получаешь <b>сертификат участника</b>!\n"
-            "Знания об ESG у тебя есть — это главное.\n"
-            "Можно попробовать улучшить результат в следующей сессии."
+            "Теперь его можно проверить командой:\n"
+            "<code>/check-certificate "
+            f"{cert_number}</code>"
         )
 
     await bot.send_message(
@@ -125,7 +129,6 @@ async def finish_quiz(user_id: int, bot: Bot, chat_id: int):
     )
 
 
-# ── Callback: кнопка «🏆 Пройти финальный тест» ───────────────────────────────
 @router.callback_query(F.data == "start_quiz")
 async def on_start_quiz(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -133,8 +136,6 @@ async def on_start_quiz(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Callback: кнопка «Начать тест ▶️» (continue) уже обрабатывается в days.py,
-#    но нам нужна своя логика когда user в состоянии day=6 ─────────────────────
 @router.callback_query(F.data == "continue")
 async def on_quiz_continue(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
@@ -142,11 +143,8 @@ async def on_quiz_continue(callback: CallbackQuery):
         await callback.message.edit_reply_markup(reply_markup=None)
         await send_quiz_question(callback.from_user.id, callback.bot, callback.message.chat.id)
         await callback.answer()
-    # Если это не quiz-контекст — пропускаем, days.py обработает
-    # (aiogram отдаёт первому подходящему router, порядок важен в bot.py)
 
 
-# ── Callback: ответ на вопрос теста ──────────────────────────────────────────
 @router.callback_query(F.data.startswith("quiz_"))
 async def on_quiz_answer(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -176,27 +174,78 @@ async def on_quiz_answer(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Callback: показать рейтинг ────────────────────────────────────────────────
-@router.callback_query(F.data == "show_rating")
-async def on_show_rating(callback: CallbackQuery):
-    from database import get_top_rating
-    rows = await get_top_rating(10)
+def _build_rating_text(rows: list[dict], current_user_id: int | None = None) -> str:
     if not rows:
-        await callback.message.answer("Рейтинг пока пуст. Будь первым! 🚀")
-        await callback.answer()
-        return
+        return "Рейтинг пока пуст. Будь первым! 🚀"
 
-    lines = ["🏆 <b>Топ стажёров</b>\n"]
+    lines = ["🏆 <b>Рейтинг стажёров</b>\n"]
+
     for i, r in enumerate(rows, 1):
         if i == 1:
             medal = "🥇"
         elif i == 2:
             medal = "🥈"
+        elif i == 3:
+            medal = "🥉"
         else:
             medal = f"{i}."
-        time_str = format_time(r["time_seconds"])
-        lines.append(f"{medal} <b>{r['name']}</b> — {r['quiz_score']}/100 ({time_str})")
 
-    await callback.message.answer("\n".join(lines), parse_mode="HTML")
+        time_str = format_time(r["time_seconds"])
+        line = f"{medal} <b>{r['name']}</b> — {r['quiz_score']}/100 ({time_str})"
+
+        if current_user_id is not None and r["user_id"] == current_user_id:
+            line = f"<b><u>{line}</u></b>"
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "show_rating")
+async def on_show_rating(callback: CallbackQuery):
+    rows = await get_full_rating()
+    text = _build_rating_text(rows, callback.from_user.id)
+    await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
-    
+
+
+@router.message(F.text == "/rating")
+async def cmd_rating(message: Message):
+    rows = await get_full_rating()
+    text = _build_rating_text(rows, message.from_user.id)
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(F.text.startswith("/check-certificate"))
+async def cmd_check_certificate(message: Message):
+    parts = (message.text or "").strip().split(maxsplit=1)
+
+    if len(parts) < 2:
+        await message.answer(
+            "Укажи номер сертификата так:\n<code>/check-certificate 12345</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    raw_number = parts[1].strip()
+    if not raw_number.isdigit() or len(raw_number) != 5:
+        await message.answer(
+            "Номер сертификата должен состоять из 5 цифр.\n"
+            "Пример: <code>/check-certificate 12345</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    cert_info = await get_certificate_info(int(raw_number))
+    if not cert_info:
+        await message.answer("Сертификат с таким номером не найден.")
+        return
+
+    await message.answer(
+        "🎓 <b>Проверка сертификата</b>\n\n"
+        f"Номер: <b>{cert_info['certificate_number']}</b>\n"
+        f"Владелец: <b>{cert_info['name']}</b>\n"
+        f"Баллы: <b>{cert_info['quiz_score']}/100</b>\n"
+        f"Дата выдачи: <b>{cert_info['certificate_issued_at']}</b>",
+        parse_mode="HTML"
+    )
