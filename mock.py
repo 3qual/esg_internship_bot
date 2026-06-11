@@ -5,16 +5,16 @@
 Что создаётся:
   ПОЛЬЗОВАТЕЛИ (8 человек):
     Завершили стажировку (current_day=7):
-      • Максим   — М, 23 года, 100/100, 10м 12с  🥇 1-е место
-      • Арина    — Ж, 21 год,   96/100, 14м 07с  🥈 2-е место
-      • Тимур    — М, 24 года,  96/100, 15м 01с  🥈 2-е место
-      • Полина   — Ж, 21 год,   89/100, 12м 56с
-      • Кирилл   — М, 22 года,  85/100, 15м 34с
+      • Максим   — М, 23 года, 100/100, 10м 12с  🥇 1-е место  сертификат: 28471
+      • Арина    — Ж, 21 год,   96/100, 14м 07с  🥈 2-е место  сертификат: 51839
+      • Тимур    — М, 24 года,  96/100, 15м 01с  🥈 2-е место  сертификат: 73620
+      • Полина   — Ж, 21 год,   89/100, 12м 56с               сертификат: 64017
+      • Кирилл   — М, 22 года,  85/100, 15м 34с               сертификат: 39254
 
-    В процессе обучения (имитация живых стажёров):
-      • Соня     — Ж, 20 лет,  День 3, шаг 2  (изучает декарбонизацию)
-      • Дарья    — Ж, 19 лет,  День 2, шаг 5  (изучает нефин. отчётность)
-      • Никита   — М, 22 года, День 4, шаг 3  (изучает зелёные облигации)
+    В процессе обучения:
+      • Соня     — Ж, 20 лет,  День 3, шаг 2  (декарбонизация)
+      • Дарья    — Ж, 19 лет,  День 2, шаг 5  (нефин. отчётность)
+      • Никита   — М, 22 года, День 4, шаг 3  (зелёные облигации)
 
   РЕЙТИНГ:
     Активная сессия на 30 дней.
@@ -38,26 +38,26 @@ import aiosqlite
 DB_PATH = "esg_bot.db"
 
 # ── Мок-данные ────────────────────────────────────────────────────────────────
-# (user_id, name, gender, age, current_day, current_step, quiz_score, time_offset_sec)
-# current_day=7  → стажировка полностью завершена
-# current_day=2..5 → в процессе (time_offset=0, quiz_score=0)
+# (user_id, name, gender, age, current_day, current_step,
+#  quiz_score, time_offset_sec, certificate_number)
+# certificate_number=None → пользователь ещё не завершил, сертификат не нужен
 
 MOCK_USERS = [
     # ── Завершили ──────────────────────────────────────────────────────────────
-    (100000001, "Максим",  "M", 23,  7, 0, 100,  612),   # 🥇 100 баллов
-    (100000002, "Арина",   "F", 21,  7, 0,  96,  847),   # 🥈 96, быстрее Тимура
-    (100000003, "Тимур",   "M", 24,  7, 0,  96,  901),   # 🥈 96, чуть медленнее
-    (100000004, "Полина",  "F", 21,  7, 0,  89,  776),
-    (100000005, "Кирилл",  "M", 22,  7, 0,  85,  934),
+    (100000001, "Максим", "M", 23,  7, 0, 100,  612,  28471),
+    (100000002, "Арина",  "F", 21,  7, 0,  96,  847,  51839),
+    (100000003, "Тимур",  "M", 24,  7, 0,  96,  901,  73620),
+    (100000004, "Полина", "F", 21,  7, 0,  89,  776,  64017),
+    (100000005, "Кирилл", "M", 22,  7, 0,  85,  934,  39254),
     # ── В процессе ────────────────────────────────────────────────────────────
-    (100000006, "Соня",    "F", 20,  3, 2,    0,    0),  # День 3, шаг 2
-    (100000007, "Дарья",   "F", 19,  2, 5,    0,    0),  # День 2, шаг 5
-    (100000008, "Никита",  "M", 22,  4, 3,    0,    0),  # День 4, шаг 3
+    (100000006, "Соня",   "F", 20,  3, 2,    0,    0,  None),
+    (100000007, "Дарья",  "F", 19,  2, 5,    0,    0,  None),
+    (100000008, "Никита", "M", 22,  4, 3,    0,    0,  None),
 ]
 
 # ── ANSI-цвета ────────────────────────────────────────────────────────────────
 
-G = "\033[92m"; Y = "\033[93m"; C = "\033[96m"; R = "\033[91m"
+G = "\033[92m"; Y = "\033[93m"; C = "\033[96m"
 D = "\033[2m";  B = "\033[1m";  RESET = "\033[0m"
 
 def g(t): return f"{G}{t}{RESET}"
@@ -72,17 +72,19 @@ def b(t): return f"{B}{t}{RESET}"
 async def ensure_tables(db: aiosqlite.Connection):
     await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id       INTEGER PRIMARY KEY,
-            name          TEXT,
-            gender        TEXT CHECK(gender IN ('M', 'F')),
-            age           INTEGER,
-            current_day   INTEGER DEFAULT 0,
-            current_step  INTEGER DEFAULT 0,
-            day_scores    TEXT DEFAULT '{}',
-            quiz_score    INTEGER DEFAULT 0,
-            quiz_start_ts REAL,
-            quiz_end_ts   REAL,
-            registered_at TEXT DEFAULT (datetime('now'))
+            user_id                 INTEGER PRIMARY KEY,
+            name                    TEXT,
+            gender                  TEXT CHECK(gender IN ('M', 'F')),
+            age                     INTEGER,
+            current_day             INTEGER DEFAULT 0,
+            current_step            INTEGER DEFAULT 0,
+            day_scores              TEXT DEFAULT '{}',
+            quiz_score              INTEGER DEFAULT 0,
+            quiz_start_ts           REAL,
+            quiz_end_ts             REAL,
+            certificate_number      INTEGER UNIQUE,
+            certificate_issued_at   TEXT,
+            registered_at           TEXT DEFAULT (datetime('now'))
         )
     """)
     await db.execute("""
@@ -104,6 +106,16 @@ async def ensure_tables(db: aiosqlite.Connection):
             ends_at       TEXT
         )
     """)
+    # Миграция — на случай если БД уже существует без новых полей
+    for col, definition in [
+        ("certificate_number",    "INTEGER UNIQUE"),
+        ("certificate_issued_at", "TEXT"),
+    ]:
+        async with db.execute("PRAGMA table_info(users)") as cur:
+            existing = {row[1] for row in await cur.fetchall()}
+        if col not in existing:
+            await db.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
+
     await db.commit()
 
 
@@ -137,7 +149,10 @@ async def get_or_create_session(db: aiosqlite.Connection) -> str:
 
 async def insert_users(db: aiosqlite.Connection):
     now = datetime.now()
-    for user_id, name, gender, age, day, step, quiz_score, time_offset in MOCK_USERS:
+
+    for (user_id, name, gender, age, day, step,
+         quiz_score, time_offset, cert_number) in MOCK_USERS:
+
         async with db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)) as cur:
             if await cur.fetchone():
                 print(d(f"  –  {name} уже существует, пропускаем"))
@@ -152,24 +167,33 @@ async def insert_users(db: aiosqlite.Connection):
             quiz_end_ts   = time.time() - random.randint(300, 7200)
             quiz_start_ts = quiz_end_ts - time_offset
 
+        # Дата выдачи сертификата — в пределах часа после завершения теста
+        cert_issued_at = None
+        if cert_number is not None and quiz_end_ts is not None:
+            cert_issued_at = datetime.fromtimestamp(
+                quiz_end_ts + random.randint(1, 120)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
         await db.execute("""
             INSERT INTO users
               (user_id, name, gender, age, current_day, current_step,
-               day_scores, quiz_score, quiz_start_ts, quiz_end_ts, registered_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               day_scores, quiz_score, quiz_start_ts, quiz_end_ts,
+               certificate_number, certificate_issued_at, registered_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, name, gender, age, day, step,
             "{}",
             quiz_score if day >= 7 else 0,
             quiz_start_ts, quiz_end_ts,
+            cert_number, cert_issued_at,
             registered_at
         ))
 
         if day >= 7:
-            mins = time_offset // 60
-            secs = time_offset % 60
+            mins, secs = divmod(time_offset, 60)
             suffix = "а" if gender == "F" else ""
-            status = f"завершил{suffix} — {quiz_score}/100  ({mins}м {secs:02d}с)"
+            cert_str = f"  🎓 #{cert_number}" if cert_number else ""
+            status = f"завершил{suffix} — {quiz_score}/100  ({mins}м {secs:02d}с){cert_str}"
         else:
             status = f"в процессе — день {day}, шаг {step}"
 
@@ -180,7 +204,9 @@ async def insert_users(db: aiosqlite.Connection):
 
 
 async def insert_rating(db: aiosqlite.Connection, session_id: str):
-    for user_id, name, gender, age, day, step, quiz_score, time_offset in MOCK_USERS:
+    for (user_id, name, gender, age, day, step,
+         quiz_score, time_offset, cert_number) in MOCK_USERS:
+
         if day < 7 or quiz_score == 0:
             continue
 
@@ -209,8 +235,7 @@ async def insert_rating(db: aiosqlite.Connection, session_id: str):
         """, (user_id, name, quiz_score, float(time_offset), place, session_id, achieved_at))
 
         place_str = "🥇 1-е" if place == 1 else "🥈 2-е" if place == 2 else " —"
-        mins = time_offset // 60
-        secs = time_offset % 60
+        mins, secs = divmod(time_offset, 60)
         print(g(f"  ✓  {name:<10}  {quiz_score}/100  {mins}м {secs:02d}с  {place_str}"))
 
     await db.commit()
@@ -221,35 +246,38 @@ async def show_tables(db: aiosqlite.Connection):
 
     # ── Users ─────────────────────────────────────────────────────────────────
     print(c(b("\n👤 USERS:")))
-    header = f"  {'ID':<12} {'Имя':<10} {'П':^3} {'Лет':^5} {'День':^5} {'Шаг':^4} {'Балл':^6} {'Зарегистрирован'}"
-    print(header)
-    print("  " + "─" * 65)
+    print(f"  {'ID':<12} {'Имя':<10} {'П':^3} {'Лет':^5} {'День':^5} "
+          f"{'Шаг':^4} {'Балл':^6} {'Сертификат':^12} {'Зарег.'}")
+    print("  " + "─" * 75)
 
-    async with db.execute("SELECT * FROM users ORDER BY current_day DESC, quiz_score DESC") as cur:
-        rows = await cur.fetchall()
+    async with db.execute(
+        "SELECT * FROM users ORDER BY current_day DESC, quiz_score DESC"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
 
     if not rows:
         print(d("  (пусто)"))
     else:
-        finished = [r for r in rows if dict(r)["current_day"] >= 7]
-        in_progress = [r for r in rows if dict(r)["current_day"] < 7]
+        finished    = [r for r in rows if r["current_day"] >= 7]
+        in_progress = [r for r in rows if r["current_day"] <  7]
 
         if finished:
             print(d("  — завершили —"))
         for row in finished:
-            row = dict(row)
-            reg = (row.get("registered_at") or "")[:10]
+            reg   = (row.get("registered_at") or "")[:10]
+            cert  = str(row.get("certificate_number") or "—")
             print(f"  {row['user_id']:<12} {(row['name'] or '?'):<10} "
                   f"{'Ж' if row['gender']=='F' else 'М':^3} "
                   f"{str(row['age'] or '?'):^5} "
                   f"{str(row['current_day']):^5} "
                   f"{str(row['current_step']):^4} "
                   f"{str(row['quiz_score']):^6} "
+                  f"{cert:^12} "
                   f"{reg}")
+
         if in_progress:
             print(d("  — в процессе —"))
         for row in in_progress:
-            row = dict(row)
             reg = (row.get("registered_at") or "")[:10]
             print(f"  {row['user_id']:<12} {(row['name'] or '?'):<10} "
                   f"{'Ж' if row['gender']=='F' else 'М':^3} "
@@ -257,6 +285,7 @@ async def show_tables(db: aiosqlite.Connection):
                   f"{str(row['current_day']):^5} "
                   f"{str(row['current_step']):^4} "
                   f"{'—':^6} "
+                  f"{'—':^12} "
                   f"{reg}")
 
     # ── Rating ────────────────────────────────────────────────────────────────
@@ -269,18 +298,16 @@ async def show_tables(db: aiosqlite.Connection):
         "SELECT * FROM rating WHERE session_id=? ORDER BY quiz_score DESC, time_seconds ASC",
         (session_id,)
     ) as cur:
-        rows = await cur.fetchall()
+        rows = [dict(r) for r in await cur.fetchall()]
 
     if not rows:
         print(d("  (пусто)"))
     else:
         for i, row in enumerate(rows, 1):
-            row = dict(row)
-            place = row.get("place")
+            place     = row.get("place")
             place_str = "🥇" if place == 1 else "🥈" if place == 2 else " —"
-            achieved = (row.get("achieved_at") or "")[:16]
-            mins = int(row["time_seconds"] // 60)
-            secs = int(row["time_seconds"] % 60)
+            achieved  = (row.get("achieved_at") or "")[:16]
+            mins, secs = divmod(int(row["time_seconds"]), 60)
             print(f"  {i:^4} {row['name']:<10} {row['quiz_score']:>5}/100"
                   f"  {mins}м {secs:02d}с  {place_str:>4}   {achieved}")
     print()
@@ -313,25 +340,26 @@ async def main(reset: bool, show_only: bool):
         print(c(b("\n📊 Текущее состояние БД:")))
         await show_tables(db)
 
-    print(c(g(b("✅ Готово! Запускай бота: python bot.py\n"))))
+    print(g(b("\n✅ Готово! Запускай бота: python3 bot.py\n")))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="mock.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=c(b("ESG Bot — Mock Data Seeder\n")) + "Наполняет БД демо-данными для показа на защите.",
+        description=c(b("ESG Bot — Mock Data Seeder\n")) +
+                    "Наполняет БД демо-данными для показа на защите.",
         epilog=f"""
 {b('ЧТО ЗАНОСИТСЯ В БД:')}
 
   {b('Таблица users')} — 8 пользователей:
 
     Завершили стажировку (current_day = 7):
-      Максим   М  23 года   100/100  10м 12с  🥇 1-е место
-      Арина    Ж  21 год     96/100  14м 07с  🥈 2-е место
-      Тимур    М  24 года    96/100  15м 01с  🥈 2-е место
-      Полина   Ж  21 год     89/100  12м 56с
-      Кирилл   М  22 года    85/100  15м 34с
+      Максим   М  23 года   100/100  10м 12с  🥇 1-е  сертификат #28471
+      Арина    Ж  21 год     96/100  14м 07с  🥈 2-е  сертификат #51839
+      Тимур    М  24 года    96/100  15м 01с  🥈 2-е  сертификат #73620
+      Полина   Ж  21 год     89/100  12м 56с          сертификат #64017
+      Кирилл   М  22 года    85/100  15м 34с          сертификат #39254
 
     В процессе обучения:
       Соня     Ж  20 лет   День 3, шаг 2  (декарбонизация)
@@ -339,7 +367,6 @@ if __name__ == "__main__":
       Никита   М  22 года  День 4, шаг 3  (зелёные облигации)
 
   {b('Таблица rating')} — 5 записей (только завершившие тест):
-    Сортировка: балл DESC, время ASC
     1. Максим   100/100  10м 12с  🥇
     2. Арина     96/100  14м 07с  🥈
     3. Тимур     96/100  15м 01с  🥈
@@ -348,24 +375,31 @@ if __name__ == "__main__":
 
   {b('Таблица rating_sessions')} — активная сессия на 30 дней.
 
-  Все мок-записи используют user_id в диапазоне 100000001–100000099.
-  Реальные пользователи бота {b('не затрагиваются')}.
+  Мок-записи используют user_id 100000001–100000099.
+  Реальные пользователи {b('не затрагиваются')}.
+  Номера сертификатов зафиксированы и не генерируются рандомно.
 
-{b('ПРИМЕРЫ:')}
-  python mock.py              # добавить данные (пропустит уже существующих)
-  python mock.py --reset      # удалить старые мок-данные и залить заново
-  python mock.py --show       # только посмотреть таблицы, ничего не менять
+{b('КОМАНДЫ БОТА ДЛЯ ПРОВЕРКИ:')}
+  /check-certificate 28471  → Максим,  100/100
+  /check-certificate 51839  → Арина,    96/100
+  /check-certificate 73620  → Тимур,    96/100
+  /check-certificate 64017  → Полина,   89/100
+  /check-certificate 39254  → Кирилл,   85/100
+  /rating                   → полный рейтинг
+
+{b('ПРИМЕРЫ ЗАПУСКА:')}
+  python mock.py              # добавить данные
+  python mock.py --reset      # перезалить мок с нуля
+  python mock.py --show       # только посмотреть таблицы
 """
     )
     parser.add_argument(
-        "--reset",
-        action="store_true",
-        help="Удалить существующие мок-данные (user_id 100000001–100000099) перед вставкой"
+        "--reset", action="store_true",
+        help="Удалить мок-данные (user_id 100000001–100000099) и залить заново"
     )
     parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Только вывести содержимое таблиц users и rating, без изменений"
+        "--show", action="store_true",
+        help="Только вывести содержимое таблиц, без изменений"
     )
     args = parser.parse_args()
     asyncio.run(main(reset=args.reset, show_only=args.show))
