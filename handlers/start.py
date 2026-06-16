@@ -35,6 +35,8 @@ async def cmd_start(message: Message, state: FSMContext):
         return
 
     await message.answer(
+        "Авторы: Арсений Лапшин, Ирина Бережная, Ника Бошина, Анна Лобанова",
+        " ",
         "👔 <b>Анатолий (HR):</b>\n\n"
         "Здравствуйте, меня зовут Анатолий! "
         "Я HR-менеджер компании <b>ESG Group</b>. "
