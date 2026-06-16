@@ -8,10 +8,12 @@ import asyncio
 import importlib
 import random
 import re
+from pathlib import Path
 from typing import Any
 
 from aiogram import Router, Bot, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, FSInputFile
+from aiogram.exceptions import TelegramAPIError
 
 from database import get_user, update_user, advance_step, set_day
 from utils.keyboards import (
@@ -21,6 +23,8 @@ from utils.keyboards import (
 )
 
 router = Router()
+
+MEDIA_DIR = Path(__file__).resolve().parent.parent / "media"
 
 # ── Состояние question_multi (user_id → set of selected indices) ──────────────
 _multi_state: dict[int, set] = {}
@@ -66,42 +70,65 @@ def _format(step: dict, name: str, gender: str) -> str:
     return _prefix(sender) + text
 
 
-# ── Отправка с медиа-заглушкой ────────────────────────────────────────────────
+# ── Отправка медиа-файла ──────────────────────────────────────────────────────
+
+async def _send_media_file(bot: Bot, chat_id: int, media_type: str,
+                            media_file: str, caption: str | None = None):
+    """
+    Отправляет реальный медиа-файл из папки media/.
+    voice/*.ogg  → send_voice  (отображается как голосовое сообщение)
+    image/*.jpg  → send_photo
+    video/*.mp4  → send_video
+    """
+    if not media_file:
+        return
+
+    # Ищем файл: либо полный путь, либо по типу
+    path = MEDIA_DIR / media_file
+    if not path.exists():
+        # Попробуем угадать подпапку по типу
+        sub = {"voice": "audio", "photo": "image", "video": "video"}.get(media_type, "")
+        path = MEDIA_DIR / sub / media_file
+        if not path.exists():
+            return  # файл не найден — молча пропускаем
+
+    file = FSInputFile(str(path))
+    kwargs = {"caption": caption, "parse_mode": "HTML"} if caption else {}
+
+    try:
+        if media_type == "voice":
+            await bot.send_voice(chat_id, file, **kwargs)
+        elif media_type == "photo":
+            await bot.send_photo(chat_id, file, **kwargs)
+        elif media_type == "video":
+            await bot.send_video(chat_id, file, **kwargs)
+    except TelegramAPIError:
+        pass  # если файл сломан — не крашимся
+
+
+# ── Отправка шага с возможным медиа ──────────────────────────────────────────
 
 async def _send_with_media(bot: Bot, chat_id: int, text: str, step: dict,
                            reply_markup=None):
-    media = step.get("media")
+    media_type = step.get("media")        # "voice" / "photo" / "video" / None
     media_file = step.get("media_file", "")
     kwargs = dict(parse_mode="HTML", reply_markup=reply_markup)
 
-    if media == "voice":
-        # Заглушка голосового сообщения
-        description = media_file if media_file else "голосовое сообщение"
-        placeholder = f"🎙️ <i>[Голосовое — {description}]</i>"
-        full_text = f"{placeholder}\n\n{text}" if text else placeholder
-        await bot.send_message(chat_id, full_text, **kwargs)
-
-    elif media == "video":
-        # Заглушка видео
-        description = media_file if media_file else "видео"
-        placeholder = f"🎥 <i>[Видео — {description}]</i>"
-        full_text = f"{placeholder}\n\n{text}" if text else placeholder
-        await bot.send_message(chat_id, full_text, **kwargs)
-
+    if media_type and media_file:
+        # Сначала отправляем текст, потом медиа
+        if text:
+            await bot.send_message(chat_id, text, **kwargs)
+        await _send_media_file(bot, chat_id, media_type, media_file)
     else:
         if text:
             await bot.send_message(chat_id, text, **kwargs)
 
 
-# ── Перемешивание кнопок (сохраняем маппинг новый_idx → старый_idx) ──────────
+# ── Перемешивание кнопок ──────────────────────────────────────────────────────
 
 def _shuffle_buttons(step: dict) -> tuple[list[str], dict[int, int]]:
-    """
-    Возвращает (перемешанные_кнопки, маппинг {новый_idx: старый_idx}).
-    Используется чтобы после перемешивания правильно определять correct/reactions.
-    """
     buttons = step.get("buttons", [])
-    indexed = list(enumerate(buttons))           # [(0, "текст0"), (1, "текст1"), ...]
+    indexed = list(enumerate(buttons))
     random.shuffle(indexed)
     new_buttons = [text for _, text in indexed]
     mapping = {new_i: old_i for new_i, (old_i, _) in enumerate(indexed)}
@@ -109,25 +136,50 @@ def _shuffle_buttons(step: dict) -> tuple[list[str], dict[int, int]]:
 
 
 def _remap_correct(correct: list[int], mapping: dict[int, int]) -> list[int]:
-    """Пересчитывает индексы правильных ответов под новый порядок кнопок."""
     reverse = {old: new for new, old in mapping.items()}
     return [reverse[c] for c in correct if c in reverse]
 
 
 def _remap_reactions(reactions: dict, mapping: dict[int, int]) -> dict:
-    """Пересчитывает ключи reactions (числовые) под новый порядок кнопок."""
     reverse = {old: new for new, old in mapping.items()}
     new_reactions = {}
     for key, val in reactions.items():
         if isinstance(key, int) and key in reverse:
             new_reactions[reverse[key]] = val
         else:
-            new_reactions[key] = val   # "correct"/"wrong" — не трогаем
+            new_reactions[key] = val
     return new_reactions
 
 
-# ── Хранилище маппингов перемешанных кнопок (user_id → mapping) ──────────────
 _shuffle_map: dict[int, dict[int, int]] = {}
+
+
+# ── Отправка реакций ──────────────────────────────────────────────────────────
+
+async def _send_reactions(reactions: list[dict], bot: Bot, chat_id: int,
+                          name: str, gender: str):
+    for r in reactions:
+        # Если это медиа-элемент реакции (не сообщение)
+        if r.get("media_type") and r.get("media_file"):
+            await asyncio.sleep(0.5)
+            await _send_media_file(
+                bot, chat_id,
+                r["media_type"], r["media_file"],
+                caption=r.get("text") or None
+            )
+            continue
+
+        sender = r.get("sender", "system")
+        raw = r.get("text", "")
+        text = apply_gender(raw, name, gender)
+        if not text:
+            continue
+        if sender == "system":
+            formatted = f"<i>{text}</i>"
+        else:
+            formatted = _prefix(sender) + text
+        await bot.send_message(chat_id, formatted, parse_mode="HTML")
+        await asyncio.sleep(0.8)
 
 
 # ── Основная функция отправки текущего шага ───────────────────────────────────
@@ -140,7 +192,6 @@ async def send_current_step(user_id: int, bot: Bot, chat_id: int):
     day = user["current_day"]
     step_idx = user["current_step"]
 
-    # day=6/7 → финальный тест (обрабатывается quiz.py)
     if day >= 6:
         return
 
@@ -169,7 +220,6 @@ async def send_current_step(user_id: int, bot: Bot, chat_id: int):
     gender = user["gender"] or "M"
     stype = current["type"]
 
-    # ── message ───────────────────────────────────────────────────────────────
     if stype == "message":
         text = _format(current, name, gender)
         await _send_with_media(bot, chat_id, text, current)
@@ -179,13 +229,11 @@ async def send_current_step(user_id: int, bot: Bot, chat_id: int):
         await asyncio.sleep(0.5)
         await send_current_step(user_id, bot, chat_id)
 
-    # ── message_pause ─────────────────────────────────────────────────────────
     elif stype == "message_pause":
         text = _format(current, name, gender)
         await _send_with_media(bot, chat_id, text, current,
                                reply_markup=next_button(day, step_idx))
 
-    # ── system_message ────────────────────────────────────────────────────────
     elif stype == "system_message":
         text = _format(current, name, gender)
         await bot.send_message(chat_id, text, parse_mode="HTML")
@@ -193,40 +241,31 @@ async def send_current_step(user_id: int, bot: Bot, chat_id: int):
         await asyncio.sleep(0.5)
         await send_current_step(user_id, bot, chat_id)
 
-    # ── question_single / question_single_forced ──────────────────────────────
     elif stype in ("question_single", "question_single_forced"):
         text = _format(current, name, gender)
         if text:
             await _send_with_media(bot, chat_id, text, current)
-
-        # Перемешиваем кнопки
         shuffled_buttons, mapping = _shuffle_buttons(current)
         _shuffle_map[user_id] = mapping
-
         await bot.send_message(
             chat_id,
             "Выберите ответ:",
             reply_markup=answer_buttons(shuffled_buttons, day, step_idx)
         )
 
-    # ── question_multi ────────────────────────────────────────────────────────
     elif stype == "question_multi":
         _multi_state[user_id] = set()
         text = _format(current, name, gender)
         if text:
             await _send_with_media(bot, chat_id, text, current)
-
-        # Перемешиваем кнопки
         shuffled_buttons, mapping = _shuffle_buttons(current)
         _shuffle_map[user_id] = mapping
-
         await bot.send_message(
             chat_id,
             "Выберите все подходящие варианты:",
             reply_markup=multi_buttons(shuffled_buttons, set(), day, step_idx)
         )
 
-    # ── day_end ───────────────────────────────────────────────────────────────
     elif stype == "day_end":
         text = _format(current, name, gender)
         await bot.send_message(chat_id, text, parse_mode="HTML")
@@ -249,7 +288,6 @@ async def send_current_step(user_id: int, bot: Bot, chat_id: int):
             )
         await advance_step(user_id)
 
-    # ── Устаревшие типы (обратная совместимость) ──────────────────────────────
     elif stype == "ready_choice":
         await bot.send_message(
             chat_id,
@@ -283,29 +321,10 @@ async def send_current_step(user_id: int, bot: Bot, chat_id: int):
         await advance_step(user_id)
 
 
-# ── Отправка реакций ──────────────────────────────────────────────────────────
-
-async def _send_reactions(reactions: list[dict], bot: Bot, chat_id: int,
-                          name: str, gender: str):
-    for r in reactions:
-        sender = r.get("sender", "system")
-        raw = r.get("text", "")
-        text = apply_gender(raw, name, gender)
-        if not text:
-            continue
-        if sender == "system":
-            formatted = f"<i>{text}</i>"
-        else:
-            formatted = _prefix(sender) + text
-        await bot.send_message(chat_id, formatted, parse_mode="HTML")
-        await asyncio.sleep(0.8)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# CALLBACKS
+# CALLBACKS — без изменений
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Кнопка «Далее» ────────────────────────────────────────────────────────────
 @router.callback_query(F.data.regexp(r"^day_\d+_\d+_next$"))
 async def on_next(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -315,7 +334,6 @@ async def on_next(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Кнопка «Начать день N» ────────────────────────────────────────────────────
 @router.callback_query(F.data.regexp(r"^start_day_\d+$"))
 async def on_start_day(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -326,13 +344,12 @@ async def on_start_day(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Ответ на question_single / question_single_forced ─────────────────────────
 @router.callback_query(F.data.regexp(r"^day_\d+_\d+_ans_\d+$"))
 async def on_answer_single(callback: CallbackQuery):
     parts = callback.data.split("_")
     day_val = int(parts[1])
     step_val = int(parts[2])
-    new_idx = int(parts[4])   # индекс в ПЕРЕМЕШАННОМ порядке
+    new_idx = int(parts[4])
 
     user_id = callback.from_user.id
     user = await get_user(user_id)
@@ -347,7 +364,6 @@ async def on_answer_single(callback: CallbackQuery):
     current = steps[step_val]
     stype = current["type"]
 
-    # Восстанавливаем оригинальный индекс через маппинг
     mapping = _shuffle_map.get(user_id, {})
     orig_idx = mapping.get(new_idx, new_idx)
 
@@ -367,7 +383,6 @@ async def on_answer_single(callback: CallbackQuery):
 
     if not is_correct and retry:
         await asyncio.sleep(0.5)
-        # Новое перемешивание для повтора
         shuffled_buttons, new_mapping = _shuffle_buttons(current)
         _shuffle_map[user_id] = new_mapping
         await callback.bot.send_message(
@@ -383,13 +398,12 @@ async def on_answer_single(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Toggle чекбокса question_multi ───────────────────────────────────────────
 @router.callback_query(F.data.regexp(r"^day_\d+_\d+_toggle_\d+$"))
 async def on_toggle(callback: CallbackQuery):
     parts = callback.data.split("_")
     day_val = int(parts[1])
     step_val = int(parts[2])
-    toggle_new_idx = int(parts[4])   # индекс в перемешанном порядке
+    toggle_new_idx = int(parts[4])
 
     user_id = callback.from_user.id
     user = await get_user(user_id)
@@ -416,7 +430,6 @@ async def on_toggle(callback: CallbackQuery):
 
 
 def _get_shuffled(user_id: int, step: dict) -> tuple[list[str], dict]:
-    """Возвращает текущий перемешанный порядок кнопок для пользователя."""
     mapping = _shuffle_map.get(user_id, {})
     if not mapping:
         return step.get("buttons", []), {}
@@ -428,7 +441,6 @@ def _get_shuffled(user_id: int, step: dict) -> tuple[list[str], dict]:
     return shuffled, mapping
 
 
-# ── Подтверждение question_multi ──────────────────────────────────────────────
 @router.callback_query(F.data.regexp(r"^day_\d+_\d+_confirm$"))
 async def on_confirm_multi(callback: CallbackQuery):
     parts = callback.data.split("_")
@@ -447,7 +459,6 @@ async def on_confirm_multi(callback: CallbackQuery):
     steps = load_day(day_val)
     current = steps[step_val]
 
-    # Переводим выбранные новые индексы обратно в оригинальные
     mapping = _shuffle_map.get(user_id, {})
     selected_new = _multi_state.get(user_id, set())
     selected_orig = {mapping.get(i, i) for i in selected_new}
@@ -471,7 +482,6 @@ async def on_confirm_multi(callback: CallbackQuery):
     if not is_correct and retry:
         _multi_state[user_id] = set()
         await asyncio.sleep(0.5)
-        # Новое перемешивание для повтора
         shuffled_buttons, new_mapping = _shuffle_buttons(current)
         _shuffle_map[user_id] = new_mapping
         await callback.bot.send_message(
@@ -488,8 +498,6 @@ async def on_confirm_multi(callback: CallbackQuery):
 
     await callback.answer()
 
-
-# ── Обратная совместимость: старые callbacks ──────────────────────────────────
 
 @router.callback_query(F.data == "ready_yes")
 async def on_ready_yes(callback: CallbackQuery):
@@ -515,10 +523,8 @@ async def on_ready_no(callback: CallbackQuery):
 
 @router.callback_query(F.data == "continue")
 async def on_continue(callback: CallbackQuery):
-    # Только если НЕ в состоянии теста (quiz.py перехватит раньше если роутеры подключены правильно)
     user = await get_user(callback.from_user.id)
     if user and user.get("current_day", 0) >= 6:
-        # Отдаём quiz.py — но на случай если порядок роутеров неправильный, дублируем
         from handlers.quiz import send_quiz_question
         await callback.message.edit_reply_markup(reply_markup=None)
         await send_quiz_question(callback.from_user.id, callback.bot, callback.message.chat.id)
